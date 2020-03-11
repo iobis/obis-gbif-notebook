@@ -1,0 +1,134 @@
+---
+title: "OBIS datasets in GBIF"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+This notebook addresses the following questions:
+
+- How many OBIS datasets are published to GBIF?
+- How many OBIS datasets in GBIF are linked to the OBIS network (GBIF)?
+- How many OBIS network (GBIF) datasets are orphaned (no longer published by OBIS)?
+- How many OBIS datasets in GBIF do not a citation?
+
+## Data preparation
+
+Load packages:
+
+```{r message = FALSE}
+library(robis)
+library(rgbif)
+library(dplyr)
+library(glue)
+library(jsonlite)
+```
+
+Fetch all OBIS datasets:
+
+```{r message = FALSE}
+obis_datasets <- dataset()
+```
+
+Fetch all GBIF datasets:
+
+```{r message = FALSE, warning = FALSE}
+if (!file.exists("gbif_datasets_endpoints.dat")) {
+  
+  batch_size <- 100
+  gbif_datasets <- data.frame()
+  offset <- 0
+  
+  while (TRUE) {
+    url <- glue("https://api.gbif.org/v1/dataset?limit={batch_size}&offset={offset}")
+    message(url)
+    gbif_subset <- fromJSON(url)$results
+    if (length(gbif_subset) == 0) {
+      break
+    }
+    if (!("homepage") %in% names(gbif_subset)) {
+      gbif_subset$homepage <- NA
+    }
+    gbif_datasets <- bind_rows(gbif_datasets, gbif_subset %>% select(key, installationKey, publishingOrganizationKey, title, created, modified, homepage, endpoints))
+    offset <- offset + batch_size
+  }
+  
+  # extract archive URLs from GBIF endpoints
+  
+  find_gbif_archive <- function(endpoints) {
+    archives <- endpoints %>% filter(type == "DWC_ARCHIVE")
+    if (nrow(archives) > 0) {
+      return(archives$url[1])
+    } else {
+      return(NA)
+    }
+  }
+  
+  gbif_datasets_endpoints <- gbif_datasets %>%
+    rowwise() %>% 
+    mutate(gbif_archive = find_gbif_archive(endpoints))
+  
+  # save to file
+  
+  save(gbif_datasets_endpoints, file = "gbif_datasets_endpoints.dat")
+  
+} else {
+  load("gbif_datasets_endpoints.dat")
+}
+```
+
+Match OBIS and GBIF datasets:
+
+```{r message = FALSE, warning = FALSE}
+obis_datasets_merged <- obis_datasets %>%
+  left_join(gbif_datasets_endpoints, by = c("archive" = "gbif_archive"))
+```
+
+Fetch all OBIS network datasets from GBIF:
+
+```{r message = FALSE}
+obis_network <- fromJSON("https://api.gbif.org/v1/network/2b7c7b4f-4d4f-40d3-94de-c28b6fa054a6/constituents?limit=1000")$results
+```
+
+## How many OBIS datasets are published to GBIF?
+
+```{r results = "asis"}
+obis_in_gbif <- obis_datasets_merged %>%
+  filter(!is.na(key))
+num_obis_in_gbif <- nrow(obis_in_gbif)
+cat(glue("There are {num_obis_in_gbif} active OBIS datasets in GBIF."))
+```
+
+## How many active OBIS datasets in GBIF are linked to the OBIS network (GBIF)?
+
+```{r results = "asis"}
+obis_in_network <- obis_in_gbif %>%
+  filter(key %in% obis_network$key)
+num_obis_in_network <- nrow(obis_in_network)
+cat(glue("Out of {num_obis_in_gbif} active OBIS datasets in GBIF, {num_obis_in_network} are linked to the OBIS network."))
+```
+
+## How many OBIS network (GBIF) datasets are orphaned (no longer published by OBIS)?
+
+```{r results = "asis"}
+num_orphaned <- nrow(obis_network) - num_obis_in_network
+cat(glue("{num_orphaned} datasets linked to the OBIS network are no longer published by OBIS."))
+```
+
+## How many OBIS datasets in GBIF do not a citation?
+
+```{r results = "asis"}
+num_no_citation <- sum(is.na(obis_in_gbif$citation))
+cat(glue("{num_no_citation} OBIS datasets in GBIF do not have a citation."))
+```
+
+## Output
+
+OBIS datasets in GBIF not linked to the network:
+
+```{r message = FALSE}
+obis_not_in_network <- obis_in_gbif %>%
+  filter(!(key %in% obis_network$key)) %>%
+  select(id, url, key)
+write.csv(obis_not_in_network, file = "obis_not_in_network.csv", row.names = FALSE)
+```
